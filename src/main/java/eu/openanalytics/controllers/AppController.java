@@ -52,10 +52,13 @@ public class AppController {
 		Matcher matcher = Pattern.compile(".*/app/(.*)").matcher(request.getRequestURI());
 		String appName = matcher.matches() ? matcher.group(1) : null;
 		String mapping = dockerService.getMapping(userName, appName);
+		// needed if running e.g. at example.com/sp, then contextPath is "/sp"
+		String contextPath = environment.getProperty("server.contextPath");
 		
 		map.put("title", environment.getProperty("shiny.proxy.title"));
 		map.put("logo", environment.getProperty("shiny.proxy.logo-url"));
-		map.put("container", "/" + mapping + environment.getProperty("shiny.proxy.landing-page"));
+		map.put("contextPath", contextPath);
+		map.put("container", contextPath + "/" + mapping + environment.getProperty("shiny.proxy.landing-page"));
 		map.put("heartbeatRate", environment.getProperty("shiny.proxy.heartbeat-rate", "10000"));
 		map.put("adminGroups", userService.getAdminRoles());
 		
