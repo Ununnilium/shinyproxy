@@ -15,10 +15,13 @@
  */
 package eu.openanalytics.services;
 
+import java.io.FileInputStream;
+import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
+import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -26,9 +29,12 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.annotation.PreDestroy;
 import javax.inject.Inject;
@@ -48,10 +54,12 @@ import com.spotify.docker.client.messages.ContainerConfig;
 import com.spotify.docker.client.messages.ContainerCreation;
 import com.spotify.docker.client.messages.ContainerInfo;
 import com.spotify.docker.client.messages.HostConfig;
+import com.spotify.docker.client.messages.HostConfig.Builder;
 import com.spotify.docker.client.messages.PortBinding;
 
 import eu.openanalytics.ShinyProxyException;
 import eu.openanalytics.services.AppService.ShinyApp;
+import eu.openanalytics.services.EventService.EventType;
 
 @Service
 public class DockerService {
@@ -69,6 +77,9 @@ public class DockerService {
 	
 	@Inject
 	AppService appService;
+	
+	@Inject
+	EventService eventService;
 	
 	@Inject
 	DockerClient dockerClient;
@@ -148,23 +159,31 @@ public class DockerService {
 	}
 
 	public String getMapping(String userName, String appName) {
-		Proxy proxy = findProxy(userName);
+		Proxy proxy = findProxy(userName, appName);
 		if (proxy == null) {
 			// The user has no proxy yet.
-			proxy = startProxy(userName, appName);
-		} else if (appName.equals(proxy.appName)) {
-			// The user's proxy is good to go.
-		} else {
-			// The user's proxy is running the wrong app.
-			releaseProxy(proxy, true);
 			proxy = startProxy(userName, appName);
 		}
 		return (proxy == null) ? null : proxy.name;
 	}
 	
-	public void releaseProxy(String userName) {
-		Proxy proxy = findProxy(userName);
-		if (proxy != null) releaseProxy(proxy, true);
+	public void releaseProxies(String userName) {
+		List<Proxy> proxiesToRelease = new ArrayList<>();
+		synchronized (activeProxies) {
+			for (Proxy proxy: activeProxies) {
+				if (userName.equals(proxy.userName)) proxiesToRelease.add(proxy);
+			}
+		}
+		for (Proxy proxy: proxiesToRelease) {
+			releaseProxy(proxy, true);
+		}
+	}
+	
+	public void releaseProxy(String userName, String appName) {
+		Proxy proxy = findProxy(userName, appName);
+		if (proxy != null) {
+			releaseProxy(proxy, true);
+		}
 	}
 	
 	private void releaseProxy(Proxy proxy, boolean async) {
@@ -177,6 +196,7 @@ public class DockerService {
 					dockerClient.removeContainer(proxy.containerId);
 					releasePort(proxy.port);
 					log.info(String.format("Proxy released [user: %s] [app: %s] [port: %d]", proxy.userName, proxy.appName, proxy.port));
+					eventService.post(EventType.AppStop.toString(), proxy.userName, proxy.appName);
 				} catch (Exception e){
 					log.error("Failed to stop container " + proxy.name, e);
 				}
@@ -200,7 +220,7 @@ public class DockerService {
 			throw new ShinyProxyException("Cannot start container: unknown application: " + appName);
 		}
 		
-		Proxy proxy = findProxy(userName);
+		Proxy proxy = findProxy(userName, appName);
 		if (proxy != null) {
 			throw new ShinyProxyException("Cannot start container: user " + userName + " already has a running proxy");
 		}
@@ -215,7 +235,12 @@ public class DockerService {
 			List<PortBinding> hostPorts = new ArrayList<PortBinding>();
 		    hostPorts.add(PortBinding.of("0.0.0.0", proxy.port));
 			portBindings.put("3838", hostPorts);
-			final HostConfig hostConfig = HostConfig.builder()
+			
+			long memoryLimit = convertMemory(app.getDockerMemory());
+			
+			Builder hostConfigBuilder = HostConfig.builder();
+			if (memoryLimit > 0) hostConfigBuilder.memory(memoryLimit);
+			final HostConfig hostConfig = hostConfigBuilder
 					.portBindings(portBindings)
 					.dns(app.getDockerDns())
 					.build();
@@ -225,6 +250,8 @@ public class DockerService {
 				    .image(app.getDockerImage())
 				    .exposedPorts("3838")
 				    .cmd(app.getDockerCmd())
+				    .env(buildEnv(userName, app))
+				    .volumes(buildVolumes(app))
 				    .build();
 			
 			ContainerCreation container = dockerClient.createContainer(containerConfig);
@@ -239,7 +266,7 @@ public class DockerService {
 			throw new ShinyProxyException("Failed to start container: " + e.getMessage(), e);
 		}
 
-		if (!testContainer(proxy, 20, 500)) {
+		if (!testContainer(proxy, 20, 500, 5000)) {
 			releaseProxy(proxy, true);
 			throw new ShinyProxyException("Container did not respond in time");
 		}
@@ -255,31 +282,65 @@ public class DockerService {
 		
 		activeProxies.add(proxy);
 		log.info(String.format("Proxy activated [user: %s] [app: %s] [port: %d]", userName, appName, proxy.port));
+		eventService.post(EventType.AppStart.toString(), userName, appName);
+		
 		return proxy;
 	}
 	
-	private Proxy findProxy(String userName) {
+	private Proxy findProxy(String userName, String appName) {
 		synchronized (activeProxies) {
 			for (Proxy proxy: activeProxies) {
-				if (userName.equals(proxy.userName)) return proxy;
+				if (userName.equals(proxy.userName) && appName.equals(proxy.appName)) return proxy;
 			}
 		}
 		return null;
 	}
 	
-	private boolean testContainer(Proxy proxy, int maxTries, int waitMs) {
+	private boolean testContainer(Proxy proxy, int maxTries, int waitMs, int timeoutMs) {
+		String urlString = String.format("http://%s:%d", environment.getProperty("shiny.proxy.docker.host"), proxy.port);
 		for (int currentTry = 1; currentTry <= maxTries; currentTry++) {
 			try {
-				URL testURL = new URL("http://" + environment.getProperty("shiny.proxy.docker.host") + ":" + proxy.port);
-				int responseCode = ((HttpURLConnection) testURL.openConnection()).getResponseCode();
+				URL testURL = new URL(urlString);
+				HttpURLConnection connection = ((HttpURLConnection) testURL.openConnection());
+				connection.setConnectTimeout(timeoutMs);
+				int responseCode = connection.getResponseCode();
 				if (responseCode == 200) return true;
 			} catch (Exception e) {
+				log.warn(String.format("Container unresponsive, trying again (%d/%d): %s", currentTry, maxTries, urlString));
 				try { Thread.sleep(waitMs); } catch (InterruptedException ignore) {}
 			}
 		}
 		return false;
 	}
 
+	private List<String> buildEnv(String userName, ShinyApp app) throws IOException {
+		List<String> env = new ArrayList<>();
+		env.add(String.format("SHINYPROXY_USERNAME=%s", userName));
+		
+		String envFile = app.getDockerEnvFile();
+		if (envFile != null && Files.isRegularFile(Paths.get(envFile))) {
+			Properties envProps = new Properties();
+			envProps.load(new FileInputStream(envFile));
+			for (Object key: envProps.keySet()) {
+				env.add(String.format("%s=%s", key, envProps.get(key)));
+			}
+		}
+		
+		return env;
+	}
+	
+	private Set<String> buildVolumes(ShinyApp app) {
+		Set<String> volumes = new HashSet<>();
+
+		if (app.getDockerVolumes() != null) {
+			for (String vol: app.getDockerVolumes()) {
+				volumes.add(vol);
+			}
+		}
+		
+		return volumes;
+	}
+	
 	private int getFreePort() {
 		int startPort = Integer.valueOf(environment.getProperty("shiny.proxy.docker.port-range-start"));
 		int nextPort = startPort;
@@ -292,6 +353,27 @@ public class DockerService {
 		occupiedPorts.remove(port);
 	}
 
+	private long convertMemory(String memory) {
+		if (memory == null || memory.isEmpty()) return -1;
+		Matcher matcher = Pattern.compile("(\\d+)([bkmg]?)").matcher(memory.toLowerCase());
+		if (!matcher.matches()) throw new IllegalArgumentException("Invalid memory argument: " + memory);
+		long mem = Long.parseLong(matcher.group(1));
+		String unit = matcher.group(2);
+		switch (unit) {
+		case "k":
+			mem *= 1024;
+			break;
+		case "m":
+			mem *= 1024*1024;
+			break;
+		case "g":
+			mem *= 1024*1024*1024;
+			break;
+		default:
+		}
+		return mem;
+	}
+	
 	public void addMappingListener(MappingListener listener) {
 		mappingListeners.add(listener);
 	}

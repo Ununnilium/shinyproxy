@@ -16,6 +16,8 @@
 package eu.openanalytics;
 
 import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 
 import javax.inject.Inject;
 
@@ -29,7 +31,6 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
 import org.springframework.scheduling.annotation.EnableAsync;
 
-import eu.openanalytics.services.AppService;
 import eu.openanalytics.services.DockerService;
 import eu.openanalytics.services.DockerService.MappingListener;
 import io.undertow.Handlers;
@@ -54,13 +55,15 @@ public class ShinyProxyApplication {
 	DockerService dockerService;
 
 	@Inject
-	AppService appService;
-	
-	@Inject
 	Environment environment;
 
 	public static void main(String[] args) {
-		SpringApplication.run(new Class[] { ShinyProxyApplication.class }, args);
+		SpringApplication app = new SpringApplication(ShinyProxyApplication.class);
+		
+		boolean hasExternalConfig = Files.exists(Paths.get("application.yml"));
+		if (!hasExternalConfig) app.setAdditionalProfiles("demo");
+		
+		app.run(args);
 	}
 
 	@Bean

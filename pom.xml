@@ -5,7 +5,7 @@
 
 	<groupId>eu.openanalytics</groupId>
 	<artifactId>shinyproxy</artifactId>
-	<version>0.4.0</version>
+	<version>0.8.0</version>
 	<packaging>jar</packaging>
 
 	<name>shinyproxy</name>
@@ -95,6 +95,21 @@
     	<dependency>
     		<groupId>org.springframework.boot</groupId>
     		<artifactId>spring-boot-starter-undertow</artifactId>
+    	</dependency>
+    	<dependency>
+    		<groupId>io.undertow</groupId>
+    		<artifactId>undertow-core</artifactId>
+    		<version>1.4.4.Final</version>
+    	</dependency>
+    	<dependency>
+    		<groupId>io.undertow</groupId>
+    		<artifactId>undertow-servlet</artifactId>
+    		<version>1.4.4.Final</version>
+    	</dependency>
+    	<dependency>
+    		<groupId>io.undertow</groupId>
+    		<artifactId>undertow-websockets-jsr</artifactId>
+    		<version>1.4.4.Final</version>
     	</dependency>
 	</dependencies>
 	
