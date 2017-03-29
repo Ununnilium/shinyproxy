@@ -22,9 +22,8 @@
 		
 		function heartbeat() {
 		    setTimeout(function() {
-				var loc = window.location.pathname;
-				var contextPath = loc.substring(0, loc.lastIndexOf('/'));
-				$.ajax(contextPath + "/heartbeat" + loc).success(function(data) {
+                var path = window.location.pathname.split('/');
+				$.ajax('/' + path[1] + "/heartbeat/" + path.slice(2).join('/')).success(function(data) {
 		        	heartbeat();
 		        });
 		    }, [[${heartbeatRate}]]);
